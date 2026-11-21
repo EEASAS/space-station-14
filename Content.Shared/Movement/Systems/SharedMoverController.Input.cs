@@ -114,6 +114,7 @@ namespace Content.Shared.Movement.Systems
             entity.Comp.TargetRelativeRotation = state.TargetRelativeRotation;
             entity.Comp.CanMove = state.CanMove;
             entity.Comp.RelativeEntity = EnsureEntity<InputMoverComponent>(state.RelativeEntity, entity.Owner);
+            entity.Comp.TileMovementTarget = state.TileMovementTarget;
 
             // Reset
             entity.Comp.LastInputTick = GameTick.Zero;
@@ -138,6 +139,7 @@ namespace Content.Shared.Movement.Systems
                 RelativeEntity = GetNetEntity(entity.Comp.RelativeEntity),
                 LerpTarget = entity.Comp.LerpTarget,
                 HeldMoveButtons = entity.Comp.HeldMoveButtons,
+                TileMovementTarget = entity.Comp.TileMovementTarget,
                 RelativeRotation = entity.Comp.RelativeRotation,
                 TargetRelativeRotation = entity.Comp.TargetRelativeRotation,
             };
@@ -256,6 +258,12 @@ namespace Content.Shared.Movement.Systems
 
         private void OnInputParentChange(Entity<InputMoverComponent> entity, ref EntParentChangedMessage args)
         {
+            if (entity.Comp.TileMovementTarget != null)
+            {
+                entity.Comp.TileMovementTarget = null;
+                Dirty(entity);
+            }
+
             // If we change our grid / map then delay updating our LastGridAngle.
             var relative = args.Transform.GridUid;
             relative ??= args.Transform.MapUid;

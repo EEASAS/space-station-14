@@ -1,6 +1,7 @@
 using System.Numerics;
 using Content.Shared.Movement.Systems;
 using Robust.Shared.GameStates;
+using Robust.Shared.Maths;
 using Robust.Shared.Serialization;
 using Robust.Shared.Serialization.TypeSerializers.Implementations.Custom;
 using Robust.Shared.Timing;
@@ -54,6 +55,8 @@ namespace Content.Shared.Movement.Components
         [ViewVariables]
         public Vector2 WishDir;
 
+        public Vector2i? TileMovementTarget;
+
         /// <summary>
         /// Entity our movement is relative to.
         /// </summary>
@@ -94,6 +97,7 @@ namespace Content.Shared.Movement.Components
     {
         public MoveButtons HeldMoveButtons;
         public NetEntity? RelativeEntity;
+        public Vector2i? TileMovementTarget;
         public Angle TargetRelativeRotation;
         public Angle RelativeRotation;
         public TimeSpan LerpTarget;

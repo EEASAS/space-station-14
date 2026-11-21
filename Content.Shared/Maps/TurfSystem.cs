@@ -107,8 +107,12 @@ public sealed partial class TurfSystem : EntitySystem
     /// <summary>
     ///     Returns true if a given tile is blocked by physics-enabled entities.
     /// </summary>
-    public bool IsTileBlocked(TileRef turf, CollisionGroup mask, float minIntersectionArea = 0.1f)
-        => IsTileBlocked(turf.GridUid, turf.GridIndices, mask, minIntersectionArea: minIntersectionArea);
+    public bool IsTileBlocked(
+        TileRef turf,
+        CollisionGroup mask,
+        float minIntersectionArea = 0.1f,
+        LookupFlags flags = LookupFlags.Dynamic | LookupFlags.Static)
+        => IsTileBlocked(turf.GridUid, turf.GridIndices, mask, minIntersectionArea: minIntersectionArea, flags: flags);
 
     /// <summary>
     ///     Returns true if a given tile is blocked by physics-enabled entities.
@@ -119,12 +123,14 @@ public sealed partial class TurfSystem : EntitySystem
     /// <param name="grid">Grid component</param>
     /// <param name="gridXform">Grid's transform</param>
     /// <param name="minIntersectionArea">Minimum area that must be covered for a tile to be considered blocked</param>
+    /// <param name="flags">The entity lookup categories to check</param>
     public bool IsTileBlocked(EntityUid gridUid,
         Vector2i indices,
         CollisionGroup mask,
         MapGridComponent? grid = null,
         TransformComponent? gridXform = null,
-        float minIntersectionArea = 0.1f)
+        float minIntersectionArea = 0.1f,
+        LookupFlags flags = LookupFlags.Dynamic | LookupFlags.Static)
     {
         if (!Resolve(gridUid, ref grid, ref gridXform))
             return false;
@@ -141,7 +147,7 @@ public sealed partial class TurfSystem : EntitySystem
         tileAabb = tileAabb.Translated(localPos);
 
         var intersectionArea = 0f;
-        foreach (var ent in _entityLookup.GetEntitiesIntersecting(gridUid, worldBox, LookupFlags.Dynamic | LookupFlags.Static))
+        foreach (var ent in _entityLookup.GetEntitiesIntersecting(gridUid, worldBox, flags))
         {
             if (!_fixtureQuery.TryGetComponent(ent, out var fixtures))
                 continue;

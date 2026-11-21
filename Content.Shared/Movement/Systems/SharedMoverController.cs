@@ -9,6 +9,7 @@ using Content.Shared.Maps;
 using Content.Shared.Mobs.Systems;
 using Content.Shared.Movement.Components;
 using Content.Shared.Movement.Events;
+using Content.Shared.Physics;
 using Content.Shared.Shuttles.Components;
 using Content.Shared.Tag;
 using Robust.Shared.Audio;
@@ -17,6 +18,7 @@ using Robust.Shared.Configuration;
 using Robust.Shared.Containers;
 using Robust.Shared.Map;
 using Robust.Shared.Map.Components;
+using Robust.Shared.Maths;
 using Robust.Shared.Physics;
 using Robust.Shared.Physics.Components;
 using Robust.Shared.Physics.Controllers;
@@ -44,6 +46,7 @@ public abstract partial class SharedMoverController : VirtualController
     [Dependency] private SharedAudioSystem _audio = default!;
     [Dependency] private SharedContainerSystem _container = default!;
     [Dependency] private SharedMapSystem _mapSystem = default!;
+    [Dependency] private TurfSystem _turf = default!;
     [Dependency] private SharedGravitySystem _gravity = default!;
     [Dependency] private SharedTransformSystem _transform = default!;
     [Dependency] private TagSystem _tags = default!;
@@ -226,11 +229,19 @@ public abstract partial class SharedMoverController : VirtualController
         UsedMobMovement[uid] = true;
 
         var moveSpeedComponent = ModifierQuery.CompOrNull(uid);
+        var walkSpeed = weightless
+            ? moveSpeedComponent?.WeightlessWalkSpeed ?? MovementSpeedModifierComponent.DefaultBaseWalkSpeed
+            : moveSpeedComponent?.CurrentWalkSpeed ?? MovementSpeedModifierComponent.DefaultBaseWalkSpeed;
+        var sprintSpeed = weightless
+            ? moveSpeedComponent?.WeightlessSprintSpeed ?? MovementSpeedModifierComponent.DefaultBaseSprintSpeed
+            : moveSpeedComponent?.CurrentSprintSpeed ?? MovementSpeedModifierComponent.DefaultBaseSprintSpeed;
+        var movementSpeed = mover.Sprinting ? sprintSpeed : walkSpeed;
 
         float friction;
         float accel;
         Vector2 wishDir;
         var velocity = physicsComponent.LinearVelocity;
+        var tileMovement = MapGridQuery.TryComp(xform.GridUid, out var grid);
 
         // Get current tile def for things like speed/friction mods
         ContentTileDefinition? tileDef = null;
@@ -240,9 +251,6 @@ public abstract partial class SharedMoverController : VirtualController
         if (weightless || inAirHelpless)
         {
             // Find the speed we should be moving at and make sure we're not trying to move faster than that
-            var walkSpeed = moveSpeedComponent?.WeightlessWalkSpeed ?? MovementSpeedModifierComponent.DefaultBaseWalkSpeed;
-            var sprintSpeed = moveSpeedComponent?.WeightlessSprintSpeed ?? MovementSpeedModifierComponent.DefaultBaseSprintSpeed;
-
             wishDir = AssertValidWish(mover, walkSpeed, sprintSpeed);
 
             var ev = new CanWeightlessMoveEvent(uid);
@@ -279,9 +287,6 @@ public abstract partial class SharedMoverController : VirtualController
                 && physicsComponent.BodyStatus == BodyStatus.OnGround)
                 tileDef = (ContentTileDefinition)_tileDefinitionManager[tile.Tile.TypeId];
 
-            var walkSpeed = moveSpeedComponent?.CurrentWalkSpeed ?? MovementSpeedModifierComponent.DefaultBaseWalkSpeed;
-            var sprintSpeed = moveSpeedComponent?.CurrentSprintSpeed ?? MovementSpeedModifierComponent.DefaultBaseSprintSpeed;
-
             wishDir = AssertValidWish(mover, walkSpeed, sprintSpeed);
 
             if (wishDir != Vector2.Zero)
@@ -299,16 +304,37 @@ public abstract partial class SharedMoverController : VirtualController
             accel *= tileDef?.MobAcceleration ?? 1f;
         }
 
-        // This way friction never exceeds acceleration when you're trying to move.
-        // If you want to slow down an entity with "friction" you shouldn't be using this system.
-        if (wishDir != Vector2.Zero)
-            friction = Math.Min(friction, accel);
-        friction = Math.Max(friction, _minDamping);
-        var minimumFrictionSpeed = moveSpeedComponent?.MinimumFrictionSpeed ?? MovementSpeedModifierComponent.DefaultMinimumFrictionSpeed;
-        Friction(minimumFrictionSpeed, frameTime, friction, ref velocity);
+        if (tileMovement)
+        {
+            velocity = GetTileMovementVelocity(
+                (uid, mover),
+                xform,
+                grid!,
+                physicsComponent,
+                wishDir,
+                movementSpeed,
+                frameTime);
+            wishDir = velocity;
+        }
+        else
+        {
+            if (mover.TileMovementTarget != null)
+            {
+                mover.TileMovementTarget = null;
+                Dirty(uid, mover);
+            }
 
-        if (!weightless || touching)
-            Accelerate(ref velocity, in wishDir, accel, frameTime);
+            // This way friction never exceeds acceleration when you're trying to move.
+            // If you want to slow down an entity with "friction" you shouldn't be using this system.
+            if (wishDir != Vector2.Zero)
+                friction = Math.Min(friction, accel);
+            friction = Math.Max(friction, _minDamping);
+            var minimumFrictionSpeed = moveSpeedComponent?.MinimumFrictionSpeed ?? MovementSpeedModifierComponent.DefaultMinimumFrictionSpeed;
+            Friction(minimumFrictionSpeed, frameTime, friction, ref velocity);
+
+            if (!weightless || touching)
+                Accelerate(ref velocity, in wishDir, accel, frameTime);
+        }
 
         SetWishDir((uid, mover), wishDir);
 
@@ -364,6 +390,93 @@ public abstract partial class SharedMoverController : VirtualController
                 }
             }
         }
+    }
+
+    private Vector2 GetTileMovementVelocity(
+        Entity<InputMoverComponent> entity,
+        TransformComponent xform,
+        MapGridComponent grid,
+        PhysicsComponent physics,
+        Vector2 wishDir,
+        float speed,
+        float frameTime)
+    {
+        var gridUid = xform.GridUid!.Value;
+        var localPosition = _transform.WithEntityId(xform.Coordinates, gridUid).Position;
+        var currentTile = _mapSystem.LocalToTile(gridUid, grid, xform.Coordinates);
+        var center = _mapSystem.GridTileToLocal(gridUid, grid, currentTile).Position;
+
+        if (entity.Comp.TileMovementTarget is { } currentTarget)
+        {
+            var currentTargetPosition = _mapSystem.GridTileToLocal(gridUid, grid, currentTarget).Position;
+            if (Vector2.DistanceSquared(localPosition, currentTargetPosition) < 0.0001f)
+            {
+                entity.Comp.TileMovementTarget = null;
+                Dirty(entity);
+            }
+        }
+
+        if (entity.Comp.TileMovementTarget == null)
+        {
+            Vector2i? target = null;
+            var input = DirVecForButtons(GetNormalizedMovement(entity.Comp.HeldMoveButtons));
+
+            if (wishDir != Vector2.Zero && input != Vector2.Zero)
+            {
+                var gridRotation = _transform.GetWorldRotation(gridUid);
+                var localInput = (-gridRotation).RotateVec(wishDir);
+                var x = MathF.Abs(localInput.X) < 0.001f ? 0 : Math.Sign(localInput.X);
+                var y = MathF.Abs(localInput.Y) < 0.001f ? 0 : Math.Sign(localInput.Y);
+
+                if (x != 0 && y != 0 && DiagonalMovementEnabled &&
+                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, y)) &&
+                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, 0)) &&
+                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(0, y)))
+                {
+                    target = currentTile + new Vector2i(x, y);
+                }
+                else
+                {
+                    if (x != 0 && CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, 0)))
+                        target = currentTile + new Vector2i(x, 0);
+                    else if (y != 0 && CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(0, y)))
+                        target = currentTile + new Vector2i(0, y);
+                }
+            }
+
+            if (target == null && Vector2.DistanceSquared(localPosition, center) >= 0.0001f)
+                target = currentTile;
+
+            if (entity.Comp.TileMovementTarget != target)
+            {
+                entity.Comp.TileMovementTarget = target;
+                Dirty(entity);
+            }
+        }
+
+        if (entity.Comp.TileMovementTarget is not { } destination || speed <= 0f || frameTime <= 0f)
+            return Vector2.Zero;
+
+        var targetLocalPosition = _mapSystem.GridTileToLocal(gridUid, grid, destination).Position;
+        var worldDelta = _transform.GetWorldRotation(gridUid).RotateVec(targetLocalPosition - localPosition);
+        var distance = worldDelta.Length();
+
+        if (distance <= 0.0001f)
+            return Vector2.Zero;
+
+        var travelSpeed = Math.Min(speed, distance / frameTime);
+        return worldDelta / distance * travelSpeed;
+    }
+
+    private bool CanMoveToTile(EntityUid gridUid, MapGridComponent grid, PhysicsComponent physics, Vector2i tile)
+    {
+        return !_turf.IsTileBlocked(
+            gridUid,
+            tile,
+            (CollisionGroup) physics.CollisionMask,
+            grid,
+            minIntersectionArea: 0.1f,
+            flags: LookupFlags.Static);
     }
 
     public Vector2 GetWishDir(Entity<InputMoverComponent?> mover)
