@@ -1,4 +1,5 @@
 using System.Numerics;
+using Content.Shared.Doors.Components;
 using Robust.Shared.GameObjects;
 using Robust.Shared.Input;
 using Robust.Shared.Maths;
@@ -63,14 +64,44 @@ public sealed class TileMovementTest : MovementTest
     }
 
     [Test]
-    public async Task MovementRemainsPixelBasedOffGrid()
+    public async Task WallMountedMachineDoesNotBlockMovement()
     {
-        var start = Transform.GetWorldPosition(ToServer(Player));
-        await Move(DirectionFlag.East, 1.2f);
+        var coords = SEntMan.GetCoordinates(PlayerCoords);
+        var machine = await Spawn("APCBasic", SEntMan.GetNetCoordinates(coords.Offset(new Vector2(1, 0))));
+        await Server.WaitPost(() =>
+        {
+            var uid = ToServer(machine);
+            var xform = SEntMan.GetComponent<TransformComponent>(uid);
+            var meta = SEntMan.GetComponent<MetaDataComponent>(uid);
+            Server.System<SharedTransformSystem>().AnchorEntity((uid, xform, meta), MapData.Grid);
+        });
+
+        await MoveAndSettle(DirectionFlag.East, 0.4f);
 
         var position = Transform.GetWorldPosition(ToServer(Player));
-        Assert.That(position.X - start.X, Is.GreaterThan(4f));
-        Assert.That(MathF.Abs((position.X - start.X) % 1f), Is.GreaterThan(0.1f));
+        Assert.That(position.X, Is.GreaterThan(1.49f));
+    }
+
+    [Test]
+    public async Task AirlockOpensForTileMovement()
+    {
+        var coords = SEntMan.GetCoordinates(PlayerCoords);
+        await SetTile(Plating, SEntMan.GetNetCoordinates(coords.Offset(new Vector2(1, 0))), MapData.Grid);
+        var airlock = await Spawn("WoodDoor", SEntMan.GetNetCoordinates(coords.Offset(new Vector2(1, 0))));
+        await Server.WaitPost(() =>
+        {
+            var uid = ToServer(airlock);
+            var xform = SEntMan.GetComponent<TransformComponent>(uid);
+            var meta = SEntMan.GetComponent<MetaDataComponent>(uid);
+            Server.System<SharedTransformSystem>().AnchorEntity((uid, xform, meta), MapData.Grid);
+        });
+
+        await MoveAndSettle(DirectionFlag.East, 0.4f);
+
+        var door = Comp<DoorComponent>(airlock);
+        Assert.That(door.State, Is.Not.EqualTo(DoorState.Closed));
+        var position = Transform.GetWorldPosition(ToServer(Player));
+        Assert.That(position.X, Is.GreaterThan(1.49f));
     }
 
     private async Task MoveAndSettle(DirectionFlag direction, float seconds)

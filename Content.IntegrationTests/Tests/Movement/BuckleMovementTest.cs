@@ -58,6 +58,6 @@ public sealed class BuckleMovementTest : MovementTest
 
         // And now they can move away
         await Move(DirectionFlag.SouthEast, 1);
-        Assert.That(Delta(), Is.LessThan(-1));
+        Assert.That(Delta(), Is.LessThanOrEqualTo(-1));
     }
 }

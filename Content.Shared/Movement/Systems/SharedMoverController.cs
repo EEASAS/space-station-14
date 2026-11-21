@@ -9,7 +9,10 @@ using Content.Shared.Maps;
 using Content.Shared.Mobs.Systems;
 using Content.Shared.Movement.Components;
 using Content.Shared.Movement.Events;
+using Content.Shared.Doors.Components;
+using Content.Shared.Doors.Systems;
 using Content.Shared.Physics;
+using Content.Shared.Wall;
 using Content.Shared.Shuttles.Components;
 using Content.Shared.Tag;
 using Robust.Shared.Audio;
@@ -47,6 +50,7 @@ public abstract partial class SharedMoverController : VirtualController
     [Dependency] private SharedContainerSystem _container = default!;
     [Dependency] private SharedMapSystem _mapSystem = default!;
     [Dependency] private TurfSystem _turf = default!;
+    [Dependency] private SharedDoorSystem _doorSystem = default!;
     [Dependency] private SharedGravitySystem _gravity = default!;
     [Dependency] private SharedTransformSystem _transform = default!;
     [Dependency] private TagSystem _tags = default!;
@@ -66,9 +70,13 @@ public abstract partial class SharedMoverController : VirtualController
     [Dependency] protected EntityQuery<PreventPilotComponent> PreventPilotQuery = default!;
     [Dependency] protected EntityQuery<RelayInputMoverComponent> RelayQuery = default!;
     [Dependency] protected EntityQuery<PullableComponent> PullableQuery = default!;
+    [Dependency] protected EntityQuery<WallMountComponent> WallMountQuery = default!;
+    [Dependency] protected EntityQuery<WallComponent> WallQuery = default!;
+    [Dependency] protected EntityQuery<DoorComponent> DoorQuery = default!;
     [Dependency] protected EntityQuery<TransformComponent> XformQuery = default!;
 
     private static readonly ProtoId<TagPrototype> FootstepSoundTag = "FootstepSound";
+    private static readonly ProtoId<TagPrototype> WindowTag = "Window";
 
     private bool _relativeMovement;
     private float _minDamping;
@@ -84,6 +92,8 @@ public abstract partial class SharedMoverController : VirtualController
     public Dictionary<EntityUid, bool> UsedMobMovement = new();
 
     private readonly HashSet<EntityUid> _aroundColliderSet = [];
+    private readonly HashSet<EntityUid> _tileMovementIgnoredEntities = [];
+    private readonly HashSet<EntityUid> _tileMovementEntities = [];
 
     public override void Initialize()
     {
@@ -429,17 +439,17 @@ public abstract partial class SharedMoverController : VirtualController
                 var y = MathF.Abs(localInput.Y) < 0.001f ? 0 : Math.Sign(localInput.Y);
 
                 if (x != 0 && y != 0 && DiagonalMovementEnabled &&
-                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, y)) &&
-                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, 0)) &&
-                    CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(0, y)))
+                    CanMoveToTile(entity.Owner, gridUid, grid, physics, currentTile + new Vector2i(x, y)) &&
+                    CanMoveToTile(entity.Owner, gridUid, grid, physics, currentTile + new Vector2i(x, 0)) &&
+                    CanMoveToTile(entity.Owner, gridUid, grid, physics, currentTile + new Vector2i(0, y)))
                 {
                     target = currentTile + new Vector2i(x, y);
                 }
                 else
                 {
-                    if (x != 0 && CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(x, 0)))
+                    if (x != 0 && CanMoveToTile(entity.Owner, gridUid, grid, physics, currentTile + new Vector2i(x, 0)))
                         target = currentTile + new Vector2i(x, 0);
-                    else if (y != 0 && CanMoveToTile(gridUid, grid, physics, currentTile + new Vector2i(0, y)))
+                    else if (y != 0 && CanMoveToTile(entity.Owner, gridUid, grid, physics, currentTile + new Vector2i(0, y)))
                         target = currentTile + new Vector2i(0, y);
                 }
             }
@@ -468,15 +478,46 @@ public abstract partial class SharedMoverController : VirtualController
         return worldDelta / distance * travelSpeed;
     }
 
-    private bool CanMoveToTile(EntityUid gridUid, MapGridComponent grid, PhysicsComponent physics, Vector2i tile)
+    private bool CanMoveToTile(
+        EntityUid mover,
+        EntityUid gridUid,
+        MapGridComponent grid,
+        PhysicsComponent physics,
+        Vector2i tile)
     {
+        if (!_mapSystem.TryGetTileRef(gridUid, grid, tile, out var tileRef) || tileRef.Tile.IsEmpty)
+            return false;
+
+        _tileMovementIgnoredEntities.Clear();
+        _tileMovementEntities.Clear();
+        _lookup.GetEntitiesInTile(tileRef, _tileMovementEntities, LookupFlags.Static);
+
+        foreach (var ent in _tileMovementEntities)
+        {
+            if (DoorQuery.TryComp(ent, out var door)
+                && door.State is DoorState.Closed or DoorState.Denying
+                && _doorSystem.TryOpen(ent, door, mover, predicted: true))
+            {
+                _tileMovementIgnoredEntities.Add(ent);
+                continue;
+            }
+
+            if (WallMountQuery.HasComp(ent)
+                && !WallQuery.HasComp(ent)
+                && !_tags.HasTag(ent, WindowTag))
+            {
+                _tileMovementIgnoredEntities.Add(ent);
+            }
+        }
+
         return !_turf.IsTileBlocked(
             gridUid,
             tile,
             (CollisionGroup) physics.CollisionMask,
             grid,
             minIntersectionArea: 0.1f,
-            flags: LookupFlags.Static);
+            flags: LookupFlags.Static,
+            ignoredEntities: _tileMovementIgnoredEntities);
     }
 
     public Vector2 GetWishDir(Entity<InputMoverComponent?> mover)
